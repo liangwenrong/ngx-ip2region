@@ -1,5 +1,6 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
+#include <ngx_http.h>
 
 #include "ip2region.h"
 #include "ngx_ip2region.h"
@@ -10,6 +11,21 @@ static char *ngx_ip2region_init_conf(ngx_cycle_t *cycle, void *conf);
 
 static ngx_int_t ngx_ip2region_init_process(ngx_cycle_t *cycle);
 static void ngx_ip2region_exit_process(ngx_cycle_t *cycle);
+
+/**
+ * 新加的方法
+ */
+static ngx_int_t ngx_http_ipdb_add_variables(ngx_conf_t *cf);
+
+static ngx_int_t ngx_http_ip2region_region_name(ngx_http_request_t *r,
+                                         ngx_http_variable_value_t *v, uintptr_t data);
+
+static ngx_int_t ngx_http_ip2region_country_name(ngx_http_request_t *r,
+                                ngx_http_variable_value_t *v, uintptr_t data);
+
+datablock_entry * ngx_ip2region_get_datablock(ngx_str_t *addr_text);
+
+
 
 static ip2region_entry g_ip2region_entry;
 
@@ -154,10 +170,10 @@ ngx_ip2region_exit_process(ngx_cycle_t *cycle)
 }
 
 static ngx_inline u_char *
-ngx_strrchr(u_char *first, u_char *p, u_char c)
+ngx_strrchr(u_char *first, u_char *p, u_char country_name)
 {
     while(p >= first) {
-        if(*p == c) {
+        if(*p == country_name) {
             return p;
         }
 
@@ -259,3 +275,143 @@ ngx_ip2region_search(ngx_str_t *addr_text, ngx_str_t *isp, ngx_str_t *city)
 
     return NGX_OK;
 }
+
+/**
+ * 要添加的变量 数组
+ */
+static ngx_http_variable_t  ngx_http_ip2region_vars[] = {
+
+        { ngx_string("ip2region_region_name"), NULL,
+          ngx_http_ip2region_region_name,
+          0, 0, 0 },
+
+        { ngx_string("ip2region_country_name"), NULL,
+          ngx_http_ip2region_country_name,
+          1, 0, 0 },
+
+        { ngx_null_string, NULL, NULL, 0, 0, 0 }
+};
+
+/**
+ * 设置第一个变量，只有这个变量查ip2region库，获取region
+ * 后面其他变量从这个变量中拿到region解析出来
+ */
+static ngx_int_t
+ngx_http_ip2region_region_name(ngx_http_request_t *r,
+                        ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_str_t              *addr_text;
+
+    datablock_entry *datablock;
+    datablock = ngx_ip2region_get_datablock(addr_text);
+    if (!datablock) {//datablock 是 NULL
+        return NGX_ERROR;
+    }
+
+    v->len = sizeof(datablock->region);
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->data = &datablock->region;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_ip2region_country_name(ngx_http_request_t *r,
+                        ngx_http_variable_value_t *v, uintptr_t data)
+{
+
+//    ngx_ip2region_conf_t  *ctx;
+//    ctx = ngx_http_get_module_ctx(r, ngx_ip2region_module);
+
+//
+//    ngx_int_t index = ngx_http_get_variable_index(ngx_conf_t *cf, ngx_str_t *name);
+//    ngx_http_variable_value_t *vvv;
+//    vvv = ngx_http_get_indexed_variable(r, index);
+
+
+    char[] country_name = "country_name";
+
+    v->len = sizeof(country_name);
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->data = &country_name;
+
+
+    return NGX_OK;
+}
+
+datablock_entry *
+ngx_ip2region_get_datablock(ngx_str_t *addr_text)
+{
+//    ngx_str_t *isp;
+//    ngx_str_t *city;
+    //判断ip2region是否实例化了
+    if(g_ip2region_entry.dbHandler == NULL) {
+        ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, "search error ip %V, ip2region doesn't create", addr_text);
+        return NULL;
+    }
+    //获取二进制地址
+    uint32_t addr_binary = ngx_inet_aton(addr_text->data, addr_text->len);
+    //ip地址格式错误
+    if(addr_binary == (uint32_t)NGX_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, "search error ip %V: bad ip address", addr_text);
+        return NULL;
+    }
+
+    datablock_entry datablock;
+    //分配内存
+    ngx_memzero(&datablock, sizeof(datablock));
+    //查库
+    uint_t rc = ip2region_search_func(&g_ip2region_entry, (uint_t)addr_binary, &datablock);
+
+    if(!rc) {
+        ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0, "%V search failed", addr_text);
+        return NULL;
+    }
+
+//    ngx_log_debug2(NGX_LOG_INFO, ngx_cycle->log, 0, "%V: %s", addr_text, datablock.region);
+    return datablock;
+}
+
+
+/**
+ * 遍历ngx_http_ip2region_vars数组，逐个添加变量
+ * 变量的值取决于get_handler方法
+ */
+static ngx_int_t
+ngx_http_ipdb_add_variables(ngx_conf_t *cf)
+{
+    ngx_http_variable_t  *var, *v;
+
+    for (v = ngx_http_ip2region_vars; v->name.len; v++) {
+        var = ngx_http_add_variable(cf, &v->name, v->flags);
+        if (var == NULL) {
+            return NGX_ERROR;
+        }
+
+        var->get_handler = v->get_handler;
+        var->data = v->data;
+    }
+
+    return NGX_OK;
+}
+
+/*
+static ngx_int_t
+ngx_http_ipdb_add_variables11111111(ngx_conf_t *cf)
+{
+    ngx_http_variable_t  *var, *v;
+    var = ngx_http_add_variable(cf, &v->name, v->flags);
+
+    var = ngx_http_get_variable_index(cf, &v->name);
+
+    ngx_int_t ngx_http_get_variable_index(ngx_conf_t *cf, ngx_str_t *name);
+    ngx_http_variable_value_t *ngx_http_get_indexed_variable(ngx_http_request_t *r,
+                                                             ngx_uint_t index);
+    ngx_http_variable_value_t *ngx_http_get_flushed_variable(ngx_http_request_t *r,
+                                                             ngx_uint_t index);
+    return NGX_OK;
+}*/
